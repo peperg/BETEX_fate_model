@@ -1,0 +1,197 @@
+---
+title: "BTEX fate model - Iterative aproach "
+author: "Jose Luis Rodriguez Gil & Sawyer Stoyanovic"
+date: "13/02/2020"
+output: 
+  html_document:
+    number_sections: true
+    keep_md: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Required packages
+
+```{r message=TRUE, warning=TRUE}
+
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(patchwork)
+library(scales)
+library(broom)
+library(here)
+library(gt)
+
+library(deSolve)
+
+```
+
+# Formating
+
+Loading and setting BOREAL ggplot theme an BOREAL colour palettes
+
+```{r}
+source(here("functions", "theme_boreal.R"))     # Loads the BOREAL ggplot theme
+source(here("functions", "boreal_colours.R"))   # Loads the BOREAL themed palettes and ggplot scales
+
+theme_set(theme_boreal())  #Sets the theme for all ggplot plots to the BOREAL theme in this script
+
+```
+
+# Load data
+
+set the time interval you want to run the model over. I went with length.out instead of the steps, because this way i can get more datapoints, which makes for a smoother line.
+
+```{r}
+
+time <- seq(0, 4, length.out = 1000) 
+
+```
+
+Load the treatment data so we can have enclosure volumes and mas/volume of oil applied (volumes up to date as of Feb, 15th 2021). I usually would do it in a separate step, but making the treatment column an ordered factor here as well.
+
+```{r}
+
+treatments <- read_csv(here("data_raw", "treatments_with_volumes.csv")) %>% 
+      mutate(treatment = factor(treatment, levels = c("NFC", "FFC", "1.5 L", "2.9 L", "5.5 L", "18.1 L", "42.3 L", "81.8 L","179.8 L"))) 
+
+
+treatments
+
+```
+
+The following file contains all partitioning coefficients as well as starting concentrations. I am not sure if you'd get this from somewhere else or you'll make it by hand, but just save it as a csv and load it here. One set of constants per compound and enclosure.
+
+This is mock data with rates taken randomly from a few normal distributions. The script to create it is in the `r` folder. Obviously, use your data.
+
+```{r}
+
+btex_parameters <- read_csv(here("data_raw", "btex_parameters.csv"))
+
+btex_parameters
+
+```
+Initial BTEX data. I am going with whith what you had. One value for compound (concentration in source oil?) if you have data for each enclosure, just make a table with the values per enclosure/compound. The `left_join()` later on wil take care of the merge (as long as variable names are the same)
+
+```{r}
+
+btex_initial <- read_csv(here("data_raw", "btex_initial.csv"))
+
+btex_initial
+
+```
+# Data processing
+
+We are going to create a nested tible (virtualy a list), where we will store the individual datasets for each compound/enclosure combinations as their own cells. We include the time here as well, as the `ode()` function was being silly and didnt like looking for it outside when run inside of `pmap()`
+
+```{r}
+
+data <- btex_parameters %>%  
+  group_by(compound, enclosure) %>% 
+  nest() %>% 
+  rename(parameters = data) %>% 
+  left_join(btex_initial %>%  
+              group_by(compound) %>% 
+              nest() %>% 
+              rename(initial = data)) %>% 
+  mutate(time = list(time))
+
+data
+
+```
+
+# functions
+
+Now we define the R function to calculate the value of the derivatives at each time value. Make sure to use the names of the variables as defined in the vectors above. (For more info, check [here](https://cran.r-project.org/web/packages/deSolve/vignettes/deSolve.pdf))
+
+```{r}
+
+oil_water_function <- function(t, initial, parameters){
+  with(as.list(c(initial, parameters)), {
+    dO = -kot * oil
+    dW = kow * oil - kwt * water
+    return(list(c(dO, dW)))
+  })
+}
+
+```
+
+# Model integration
+
+Now that we have a large dataset where we have the individual datasets for parameters and initial values for each compound/enclosure combination, we can just use `pmap()` to run the `ode()` on each set. Here we also transform it into a tibble, but i had to go through a data.frame first because there was some atribute embedded in the output format of the ode() that made tibble trip.
+
+```{r}
+
+results <- data %>% 
+  mutate(output = pmap(list(parameters, initial, time),
+                       ~ ode(y = unlist(..2), times = ..3, func = oil_water_function, parms = unlist(..1)) %>% 
+                         as.data.frame %>% 
+                         as_tibble))
+
+results
+
+```
+
+You can check the output of one of them 
+
+```{r}
+
+results$output[[1]]
+
+```
+Now we un-nest it to make it easy to use inn ggplot (unless you want to make individual plots, in qich case you might want to keep nested and use `pmap()` again, but in this case to creat the plots)
+
+```{r}
+
+results_unnested <- results %>% 
+  select(-parameters, -initial, -time) %>% 
+  unnest(cols = c(output))
+
+
+results_unnested
+
+```
+
+Now we add the treatment dataset to convert to massess based on oil and enclosure volumes (this part i am not sure if it is what you wanted, if not, let me know!!)
+
+```{r}
+
+results_long <- results_unnested %>% 
+  left_join(treatments) %>% 
+  mutate(mass_in_oil = oil / (poured_oil_l/1000),
+         mass_in_water = water / initial_enc_volume) %>% 
+  ungroup() %>% 
+  select(compound, enclosure, treatment, mass_in_oil, mass_in_water, time) %>% 
+  rename(Oil = mass_in_oil,
+         Water = mass_in_water) %>% 
+  pivot_longer(cols = c(Oil, Water), names_to = "compartment", values_to = "mass")
+
+results_long
+
+```
+
+
+```{r}
+
+results_plot <- results_long %>% 
+  ggplot() +
+  facet_grid(rows = vars(compound), cols = vars(treatment)) +
+  geom_line(aes(x = time, y = mass, col = compartment)) +
+  scale_colour_boreal() +
+  scale_x_log10() +
+  scale_y_log10() +
+  theme(legend.position = "bottom")
+  
+
+ggsave(here("figures", "BTEX_model_output.pdf"), results_plot,
+         width = 190, height = 140, units = "mm")
+
+
+results_plot
+
+```
+
+
