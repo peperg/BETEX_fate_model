@@ -1,0 +1,36 @@
+---
+title: "Water exchange calculations"
+author: "Jose Luis Rodriguez Gil"
+date: "12/02/2020"
+output: 
+  html_document:
+    number_sections: true
+    keep_md: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Required packages
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(patchwork)
+library(scales)
+library(broom)
+library(here)
+library(gt)
+```
+
+# Formating
+
+Loading and setting BOREAL ggplot theme an BOREAL colour palettes
+```{r}
+source(here("functions", "theme_boreal.R"))     # Loads the BOREAL ggplot theme
+source(here("functions", "boreal_colours.R"))   # Loads the BOREAL themed palettes and ggplot scales
+
+theme_set(theme_boreal())  #Sets the theme for all ggplot plots to the BOREAL theme in this script
+
+```
